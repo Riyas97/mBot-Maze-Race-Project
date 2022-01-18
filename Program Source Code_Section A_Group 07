@@ -1,0 +1,750 @@
+/***********************************************************************
+ * Code for mBot project
+ * =====================
+ * 
+ * Version 1.2
+ * 
+ * Program to execute the tasks for CG1111 2018 Semester 1
+ * group project.
+ * 
+ * Authors:
+ * 1. LUCAS FOO SOO QUAN
+ * 2. MOHAMED RIYAS
+ * 3. MOHIDEEN IMRAN KHAN
+ * 4. PARVATHI RANJITH MENON
+ * 5. SHRIYA SAXENA
+ * 
+ * October-November 2018
+ **********************************************************************/
+
+#include "MeMCore.h"
+
+/***********************************************************************
+ * Debug mode [comment out the macro for actual race]
+ **********************************************************************/
+// #define DEBUG
+
+/***********************************************************************
+ * System parameters
+ **********************************************************************/
+#define CAL_DEL  3000
+#define AVG_SPD  70
+
+/***********************************************************************
+ * Colour definitions
+ **********************************************************************/
+#define RED 0
+#define GREEN 1
+#define WHITE 2
+#define ORANGE 3
+#define BLUE 4
+#define BLACK 5
+const String colours[] = {"RED", "GREEN", "WHITE", "ORANGE", "BLUE", "BLACK"};
+const long colourcode[][3] = { {230, 115, 130}, // RED
+                              {100, 150, 130}, // GREEN
+                              {255, 255, 255}, // WHITE
+                              {999, 999, 999}, // ORANGE : Values are set to exclude orange
+                              {85, 160, 240}, // BLUE
+                              {1, 1, 1} }; // BLACK
+                              
+
+/***********************************************************************
+ * Port configuration
+ **********************************************************************/
+#define BUZZER 8
+#define LDR A6
+#define LEFT_IR A3
+#define RIGHT_IR A2
+#define BUTTON A7
+#define LOW_FREQ A0
+#define HIGH_FREQ A1
+#define LOW_FREQ_THRESHOLD 500
+#define HIGH_FREQ_THRESHOLD 300
+MeDCMotor lmotor(M1);
+MeDCMotor rmotor(M2);
+MeRGBLed led(0, 30);
+MeLineFollower lineFinder(PORT_1);
+
+/***********************************************************************
+ * Global variables
+ * 
+ * 1. ADC values from LDR for white, black and calculated range.
+ * 2. State variable to determine if race has ended.
+ * 3. Pre-calibrated values for IR sensors (might be overridden)
+ **********************************************************************/
+long white[3] = {961, 977, 986}, black[3] = {481, 536, 624}, range[3] = {480, 441, 362};
+bool finished;
+double left_threshold = 92.16, right_threshold = 482.04;
+
+/*
+ * Set up ports and callibrateColourSensor light sensors.
+ */
+void setup() {
+  // Ports
+  led.setpin(13);
+  pinMode(BUZZER, OUTPUT);
+  pinMode(LDR, INPUT);
+  pinMode(LEFT_IR, INPUT);
+  pinMode(RIGHT_IR, INPUT);
+
+  #ifdef DEBUG
+    Serial.begin(9600);
+  #endif
+
+  /*
+  // Initialization
+  // Colour callibration removed for final race
+  callibrateColourSensor();
+  
+  beep(2);
+  delay(CAL_DEL);
+  */
+
+  callibrateIRSensors();
+  
+  finished = false;
+  delay(CAL_DEL);
+  beep(3);
+}
+
+/*
+ * Main logic
+ */
+void loop() {
+  if (!finished) {
+    // Check if there is a challenge
+    if (isChallenge()) {
+      stop();
+      performChallenge();
+    } else { // No challenge, just align and continue
+      alignRobot();
+    }
+  } else if (isButtonPressed()) {
+    finished = !finished;
+    delay(1000);
+  } 
+}
+
+/***********************************************************************
+ * Miscellaneous function definitions
+ **********************************************************************/
+
+/*
+ * Checks if the button on the mbot is pressed
+ */
+bool isButtonPressed() {
+  return analogRead(BUTTON) < 200;
+}
+
+/*
+ * Beep the specified number of times
+ */
+void beep(int count) {
+  if (count < 1) return;
+  for (int i = 0; i < 150; i++) {
+    digitalWrite(BUZZER, HIGH);
+    delayMicroseconds(500);
+    digitalWrite(BUZZER, LOW);
+    delayMicroseconds(500); 
+  }
+  delay(350);
+  beep(count - 1);
+}
+
+/*
+ * Measures the left and right distance at the start of the race.
+ * Assumes the operator places the robot in the middle.
+ */
+void callibrateIRSensors() {
+  double left = 0;
+  for (int i = 0; i < 5; i++) {
+    left += analogRead(LEFT_IR);
+    delay(10);
+  }
+  double right = 0;
+  for (int i = 0; i < 5; i++) {
+    right += analogRead(RIGHT_IR);
+    delay(10);
+  }
+  left_threshold = 0.9 * left / 5;
+  right_threshold = 0.9 * right / 5;
+
+  #ifdef DEBUG
+    Serial.println(left_threshold);
+    Serial.println(right_threshold);
+  #endif
+}
+
+/***********************************************************************
+ * LDR tasks
+ **********************************************************************/
+void callibrateColourSensor() {
+  #ifdef DEBUG
+    Serial.println("Calibrating now");
+  #endif
+  
+  beep(2);
+  delay(CAL_DEL);
+  getRGB(black);
+  
+  beep(2);
+  delay(CAL_DEL);
+  getRGB(white);
+  
+  for (int i = 0; i < 3; i++) 
+    range[i] = white[i] - black[i];
+
+  #ifdef DEBUG
+    Serial.print("Range is ");
+    printColour(range);
+    Serial.println();
+  #endif
+}
+
+/*
+ * Prints the colour code in rgb(x,x,x) format; only for debug.
+ */
+void printColour(long *arr) {
+  #ifdef DEBUG
+    Serial.print("rgb(");
+    Serial.print(arr[0]); Serial.print(", ");
+    Serial.print(arr[1]); Serial.print(", ");
+    Serial.print(arr[2]); Serial.print(") ");
+  #endif
+}
+
+/*
+ * Gets raw readings from LDR and converts them to rgb(x,x,x) format.
+ */
+void getColour(long* arr) {
+  getRGB(arr);
+  for (int i = 0; i < 3; i++)
+    arr[i] = (double)(arr[i] - black[i]) / range[i] * 255;
+
+  #ifdef DEBUG
+    Serial.print("Calculated color ");
+    printColour(arr);
+    Serial.println();
+  #endif
+}
+
+/*
+ * Gets raw readings from LDR to determine reflectivity of sample for the different colours.
+ */
+void getRGB(long* arr) {
+  onRed();
+  arr[0] = getReading();
+  onGreen();
+  arr[1] = getReading();
+  onBlue();
+  arr[2] = getReading();
+  offAll();
+  
+  #ifdef DEBUG
+    Serial.print("Obtained color ");
+    printColour(arr);
+    Serial.println();
+  #endif
+}
+
+/*
+ * Obtains readings from LDR with 10ms interval and returns the average.
+ */
+long getReading() {
+  long sum = 0;
+  for (int i = 0; i < 5; i++) {
+    sum += getLDRVal();
+    delay(10);
+  }
+  return sum / 5.0;
+}
+
+/*
+ * Returns LDR value from ADC.
+ */
+long getLDRVal() {
+  return analogRead(LDR);
+}
+
+/*
+ * Function to determine the colour of the sample above. It treats the
+ * obtained colour as a new point in a 3D space and finds the nearest
+ * predefined point. Refer to report for a more detailed explanation.
+ */
+int determineColour() {
+  long arr[3];
+  getColour(arr);
+  int best = 0;
+  double val = calculateDistance(colourcode[0], arr);
+  for (int i = 1; i < 6; i++) {
+    double angle = calculateDistance(colourcode[i], arr);
+    if (angle < val) {
+      best = i;
+      val = angle;
+    }
+  }
+
+  #ifdef DEBUG
+    Serial.print("Colour is ");
+    Serial.println(colours[best]);
+  #endif
+
+  return best;
+}
+
+/*
+ * Returns the square of the pythagorean distance
+ * between points in 3D space.
+ */
+double calculateDistance(const long* arr1, long* arr2) {
+  double sum = 0;
+  for (int i = 0; i < 3; i++) {
+    sum += (arr1[i] - arr2[i]) * (arr1[i] - arr2[i]);
+  }
+
+  #ifdef DEBUG
+    Serial.print("Distance between ");
+    printColour(arr1);
+    Serial.print(" and ");
+    printColour(arr2);
+    Serial.print(" is ");
+    Serial.println(sum);
+  #endif
+  
+  return sum;
+}
+
+/***********************************************************************
+ * Challenge definitions
+ **********************************************************************/
+
+/*
+ * Check colour. If colour is not black, do colour challenge. If colour is
+ * black, check for audio challenge and perform it if necessary. Else play 
+ * victory tune.
+ */
+void performChallenge() {
+  int colour = determineColour();
+
+  switch(colour) {
+    case RED:
+      #ifdef DEBUG
+        beep(1);
+      #endif
+      turnLeft();
+      break;
+      
+    case GREEN:
+      #ifdef DEBUG
+        beep(2);
+      #endif
+      turnRight();
+      break;
+
+    case WHITE:
+      #ifdef DEBUG
+        beep(3);
+      #endif
+      turnAround();
+      break;
+
+    case ORANGE: // This case won't occur
+      #ifdef DEBUG
+        beep(4);
+      #endif
+      turnLeftLong();
+      break;
+
+    case BLUE:
+      #ifdef DEBUG
+        beep(5);
+      #endif
+      turnRightLong();
+      break;
+
+    case BLACK:
+      // It may be a sound challenge too!
+      #ifdef DEBUG
+        beep(6);
+      #endif
+      if (isSoundChallenge()) {
+        performSoundChallenge();
+      } else {
+        finished = true;
+        victory();
+      }
+      break;
+
+    default:
+      // Impossible situation
+      beep(10);
+  }
+}
+
+/*
+ * Get the ADC value from the 300Hz filter ouput.
+ */
+int getLowFreqReading() {
+  int sum = 0;
+  for (int i = 0; i < 5; i++) {
+    sum += analogRead(LOW_FREQ);
+    delay(30);
+  }
+  return sum / 5.0;
+}
+
+/*
+ * Get the ADC value from the 3000Hz filter output.
+ */
+int getHighFreqReading() {
+  int sum = 0;
+  for (int i = 0; i < 5; i++) {
+    sum += analogRead(HIGH_FREQ);
+    delay(30);
+  }
+  return sum / 5.0;
+}
+
+/*
+ * Check if either 300Hz or 3000Hz line is high.
+ */
+bool isSoundChallenge() {
+  return getLowFreqReading() > LOW_FREQ_THRESHOLD ||
+         getHighFreqReading() > HIGH_FREQ_THRESHOLD;
+}
+
+/*
+ * Do the sound challenge; make turns as necessary
+ */
+void performSoundChallenge() {
+  int low_reading = getLowFreqReading();
+  int high_reading = getHighFreqReading();
+
+  #ifdef DEBUG
+    Serial.print("300Hz: ");
+    Serial.println(low_reading);
+    Serial.print("3000Hz: ");
+    Serial.println(high_reading);
+  #endif
+
+  if (low_reading > LOW_FREQ_THRESHOLD && high_reading > HIGH_FREQ_THRESHOLD) {
+    turnAround();
+  } else if (low_reading > LOW_FREQ_THRESHOLD) {
+    turnLeft();
+  } else {
+    turnRight();
+  }
+}
+
+/***********************************************************************
+ * IR functions and robot alignment
+ **********************************************************************/
+/*
+ * Simple algorithm to turn the robot the other way if it's too close to
+ * the maze wall.
+ */
+void alignRobot() {
+  double lmotorSpeed, rmotorSpeed;
+
+  if (isNearLeft() && isNearRight()) {
+    lmotorSpeed = AVG_SPD;
+    rmotorSpeed = AVG_SPD;
+  } else if (isNearLeft()) {
+    lmotorSpeed = AVG_SPD;
+    rmotorSpeed = 0;
+  } else if (isNearRight()) {
+    lmotorSpeed = 0;
+    rmotorSpeed = AVG_SPD;
+  } else {
+    lmotorSpeed = AVG_SPD;
+    rmotorSpeed = AVG_SPD;
+  }
+
+  leftMotor(lmotorSpeed);
+  rightMotor(rmotorSpeed);
+}
+
+/*
+ * Check if the robot is too near to the left.
+ */
+bool isNearLeft() {
+  return analogRead(LEFT_IR) < left_threshold;
+}
+
+/*
+ * Check if the robot is too near to the right.
+ */
+bool isNearRight() {
+  return analogRead(RIGHT_IR) < right_threshold;
+}
+
+/***********************************************************************
+ * Helper functions to determine challenge to perform
+ **********************************************************************/
+/*
+ * Check if there is a challenge to be performed.
+ */
+bool isChallenge() {
+  int sensorState = lineFinder.readSensors();
+
+  #ifdef DEBUG
+    if (sensorState == S1_IN_S2_IN)
+      Serial.println("Challenge detected");
+    else
+      Serial.println("No challenge detected");
+  #endif
+  
+  return sensorState == S1_IN_S2_IN;
+}
+
+/***********************************************************************
+ * RGB LED helper functions
+ **********************************************************************/
+void onRed() {
+  led.setColor(255, 0, 0); 
+  led.show();
+  delay(200);
+}
+
+void onGreen() {
+  led.setColor(0, 255, 0); 
+  led.show();
+  delay(200);
+}
+
+void onBlue() {
+  led.setColor(0, 0, 255); 
+  led.show();
+  delay(200);
+}
+
+void offAll() {
+  led.setColor(0, 0, 0); 
+  led.show();
+}
+
+/***********************************************************************
+ * Motor abstraction
+ **********************************************************************/
+void leftMotor(double speed) {
+  lmotor.run(-speed / 100 * 255);
+}
+
+void rightMotor(double speed) {
+  rmotor.run(speed / 100 * 255);
+}
+
+void stop() {
+  leftMotor(0);
+  rightMotor(0);
+}
+
+/***********************************************************************
+ * Directional commands
+ **********************************************************************/
+void turnLeft() {
+  const double DURATION = 500;
+  leftMotor(-50);
+  rightMotor(50);
+  delay(DURATION);
+  stop();
+}
+
+void turnRight() {
+  const double DURATION = 500;
+  leftMotor(50);
+  rightMotor(-50);
+  delay(DURATION);
+  stop();
+}
+
+void turnAround() {
+  const double DURATION = 1000;
+  leftMotor(50);
+  rightMotor(-50);
+  delay(DURATION);
+  stop();
+}
+
+void turnLeftLong() {
+  // turn left
+  const double TURN_DURATION = 575;
+  leftMotor(-50);
+  rightMotor(50);
+  delay(TURN_DURATION);
+  // go straight
+  const double DURATION = 1400;
+  leftMotor(50);
+  rightMotor(50);
+  delay(DURATION);
+  // turn left
+  turnLeft();
+}
+
+void turnRightLong() {
+  // turn right
+  const double TURN_DURATION = 575;
+  leftMotor(50);
+  rightMotor(-50);
+  delay(TURN_DURATION);
+  // go straight
+  const double DURATION = 1400;
+  leftMotor(50);
+  rightMotor(50);
+  delay(DURATION);
+  // turn right
+  turnRight();
+}
+
+/*
+ * The definitions and code associated with the victory tune has been 
+ * moved to the back for clarity.
+ */
+
+/***********************************************************************
+ * Musical Notes Frequencies definition
+ **********************************************************************/
+#define C4 261.63
+#define D4 293.66
+#define E4 329.63
+#define F4 349.23
+#define G4 392.00
+#define A4 440.00
+#define Amaj4 466.16
+#define B4 493.88
+#define C5 523.25
+#define D5 587.32
+#define E5 659.26
+#define F5 698.46
+#define G5 783.99
+
+
+/***********************************************************************
+ * Song to be played at vicotry condition
+ **********************************************************************/
+void victory() {
+  play_note(F4, 1000000);
+  play_note(C4, 500000);
+  play_note(F4, 500000);
+  play_note(A4, 500000);
+  play_note(F4, 500000);
+  play_note(A4, 500000);
+  play_note(D4, 500000);
+  play_note(C5, 1000000);
+  play_note(C4, 500000);
+  play_note(F4, 500000);
+  play_note(G4, 500000);
+  play_note(A4, 1000000);
+  rest(5000);
+  play_note(A4, 1000000);
+  rest(5000);
+  play_note(A4, 500000);
+  play_note(F4, 500000);
+  play_note(F4, 500000);
+  play_note(E4, 500000);
+  play_note(F4, 1000000);
+  rest(5000);
+  play_note(F4, 1000000);
+  rest(5000);
+  play_note(F4, 500000);
+  play_note(E4, 500000);
+  play_note(D4, 500000);
+  play_note(C4, 500000);
+  play_note(D4, 1000000);
+  play_note(C4, 1000000);
+  rest(5000);
+  play_note(C4, 500000);
+  play_note(F4, 500000);
+  play_note(G4, 500000);
+  play_note(F4, 500000);
+  play_note(E4, 1000000);
+  play_note(C4, 500000);
+  play_note(E4, 500000);
+  play_note(F4, 500000);
+  play_note(G4, 1000000);
+  play_note(E4, 1000000);
+  play_note(F4, 1000000);
+  play_note(G4, 1000000);
+  play_note(A4, 500000);
+  play_note(D5, 500000);
+  play_note(C5, 1000000);
+  play_note(A4, 500000);
+  play_note(A4, 500000);
+  play_note(F4, 1000000);
+  play_note(E4, 500000);
+  play_note(G4, 500000);
+  play_note(F4, 2000000);
+  rest(10000);
+  play_note(F4, 500000);
+  rest(5000);
+  play_note(F4, 500000);
+  play_note(Amaj4, 1000000);
+  play_note(D5, 1000000);
+  play_note(D5, 1000000);
+  play_note(C5, 500000);
+  play_note(A4, 500000);
+  play_note(C5, 1000000);
+  play_note(C4, 500000);
+  rest(5000);
+  play_note(G4, 500000);
+  play_note(E4, 500000);
+  play_note(F4, 500000);
+  play_note(G4, 500000);
+  play_note(A4, 2000000);
+  play_note(F4, 500000);
+  play_note(F4, 500000);
+  play_note(Amaj4, 1000000);
+  play_note(D5, 1000000);
+  play_note(D5, 1000000);
+  play_note(C5, 500000);
+  play_note(B4, 500000);
+  play_note(C5, 2000000);
+  rest(5000);
+  play_note(A4, 1000000);
+  play_note(G4, 500000);
+  play_note(F4, 1500000);
+  rest(5000);
+  play_note(F4, 500000);
+  play_note(A4, 500000);
+  play_note(Amaj4, 500000);
+  play_note(C4, 2000000);
+  rest(5000);
+  play_note(C4, 1000000);
+  play_note(D4, 5000000);
+  play_note(C4, 1000000);
+  play_note(Amaj4, 500000);
+  play_note(A4, 500000);
+  play_note(G4, 500000);
+  play_note(F4, 2500000);
+  rest(500000);
+}
+
+/***********************************************************************
+ * Funcion play a rest note i.e pause the sung for the specified durarion 
+ * in microseconds.
+ *********************************************************************/
+
+void rest(long duration) {
+  duration /= 1000;
+  digitalWrite(BUZZER, LOW);
+  for (int i = 0; i < duration; i++)
+    delay(1);
+  return;
+}
+
+/***********************************************************************
+ * Funcion play a specific note for the specified durarion 
+ * in microseconds.
+ *********************************************************************/
+
+void play_note(float note, long duration_microseconds) {
+  float period_microseconds = 1 / note * 1000000;
+  float repetitions = duration_microseconds / period_microseconds;
+  for (int i = 0; i < repetitions; i++) {
+    digitalWrite(BUZZER, HIGH);
+    delayMicroseconds(period_microseconds / 2);
+    digitalWrite(BUZZER, LOW);
+    delayMicroseconds(period_microseconds / 2);
+  }
+  return;
+}
